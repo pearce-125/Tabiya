@@ -576,6 +576,20 @@ function heroScore(occurrences) {
     const counted = wins + draws + losses;
     return counted ? { wins, draws, losses, counted, pts: wins + draws * 0.5 } : null;
 }
+// "Undecided": seen 6+ times and you've split between moves (no move played 60%+ of the time).
+function undecidedInfo(occurrences) {
+    if (!occurrences || occurrences.length < 6)
+        return null;
+    const counts = {};
+    for (const o of occurrences) {
+        const k = `${o.from.file}${o.from.rank}${o.to.file}${o.to.rank}`;
+        counts[k] = (counts[k] || 0) + 1;
+    }
+    const vals = Object.values(counts).sort((a, b) => b - a);
+    if (vals.length < 2 || vals[0] / occurrences.length >= 0.6)
+        return null;
+    return { moves: vals.length };
+}
 const OPENINGS = [
     ["e4 e5 Nf3 Nc6 Bb5 a6 Ba4", "Ruy Lopez, Morphy Defense"],
     ["e4 e5 Nf3 Nc6 Bb5 Nf6", "Ruy Lopez, Berlin"],
@@ -1411,6 +1425,8 @@ function TabiyaApp() {
     const [heroDraft, setHeroDraft] = useState("");
     const [minSeen, setMinSeen] = useState(2);
     const [strictGrading, setStrictGrading] = useState(true);
+    const [sortMode, setSortMode] = useState("seen"); // seen | worst
+    const [showReport, setShowReport] = useState(false);
     const [minMove, setMinMove] = useState(1);
     const [importMsg, setImportMsg] = useState(null);
     const [mode, setMode] = useState("browse"); // browse | quiz
@@ -1456,10 +1472,34 @@ function TabiyaApp() {
             setShowOnboarding(!dismissedOnboarding);
             setDrillStats(storedStats || {});
             setStrictGrading((await loadStored("tabiya-grading-strict", true)) !== false);
+            setSortMode((await loadStored("tabiya-sort", "seen")) === "worst" ? "worst" : "seen");
             setLoaded(true);
         })();
     }, []);
     const gamesWithTokens = useMemo(() => games.map((g) => ({ ...g, tokens: tokenizePgn(g.pgn), heroColor: g.heroColor })), [games]);
+    // Openings report: your score by the first move pair, plus by game length.
+    const openingsReport = useMemo(() => {
+        const mine = gamesWithTokens.filter((g) => g.heroColor && !g.notYours && !g.fen && g.result && g.result !== "*" && g.tokens.length >= 2);
+        if (mine.length < 10)
+            return null;
+        const pts = (g) => g.result === "1/2-1/2" ? 0.5 : ((g.result === "1-0" && g.heroColor === "w") || (g.result === "0-1" && g.heroColor === "b")) ? 1 : 0;
+        const pct = (arr) => Math.round(100 * arr.reduce((s, x) => s + x, 0) / arr.length);
+        const group = (color) => {
+            const m = {};
+            for (const g of mine) {
+                if (g.heroColor !== color)
+                    continue;
+                const k = `1.${g.tokens[0]} ${g.tokens[1]}`;
+                (m[k] = m[k] || []).push(pts(g));
+            }
+            return Object.entries(m).filter(([, a]) => a.length >= 5).map(([k, a]) => ({ k, n: a.length, pct: pct(a) })).sort((a, b) => b.n - a.n).slice(0, 8);
+        };
+        const byLen = (lo, hi) => {
+            const a = mine.filter((g) => { const n = Math.ceil(g.tokens.length / 2); return n >= lo && n <= hi; }).map(pts);
+            return a.length ? { n: a.length, pct: pct(a) } : null;
+        };
+        return { white: group("w"), black: group("b"), short: byLen(1, 20), mid: byLen(21, 40), long: byLen(41, 9999), total: mine.length };
+    }, [gamesWithTokens]);
     const { map: positionMap, errors: parseErrors } = useMemo(() => buildPositionMap(gamesWithTokens), [gamesWithTokens]);
     useEffect(() => { setErrors(parseErrors); }, [parseErrors]);
     const customMap = useMemo(() => {
@@ -1493,9 +1533,18 @@ function TabiyaApp() {
             }
             return moveNum >= minMove;
         })
-            .sort((a, b) => b[1].occurrences.length - a[1].occurrences.length)
+            .sort((a, b) => {
+            if (sortMode === "worst") {
+                // Your score here, pulled toward 50% as if you'd also played 5 even games,
+                // so a 0/2 doesn't outrank a 3/12. Positions with no results go last.
+                const rate = (v) => { const s = heroScore(v.occurrences); return s ? (s.pts + 2.5) / (s.counted + 5) : 2; };
+                const d = rate(a[1]) - rate(b[1]);
+                if (Math.abs(d) > 1e-9) return d;
+            }
+            return b[1].occurrences.length - a[1].occurrences.length;
+        })
             .slice(0, 200);
-    }, [positionMap, minSeen, minMove, colorFilter]);
+    }, [positionMap, minSeen, minMove, colorFilter, sortMode]);
     const selected = selectedKey ? (positionMap.get(selectedKey) || customMap.get(selectedKey)) : null;
     const isCustomSelected = selectedKey && selectedKey.startsWith("custom:");
     const legalTargets = useMemo(() => legalTargetsFor(selected, selectedSquare), [selected, selectedSquare]);
@@ -1778,7 +1827,9 @@ function TabiyaApp() {
     }
     function startQuiz() {
         const size = Math.min(10, recurring.length);
-        const weighted = [...recurring]
+        // In "worst score" mode, drill from your 25 worst positions.
+        const pool = sortMode === "worst" ? recurring.slice(0, 25) : recurring;
+        const weighted = [...pool]
             .map((entry) => ({ entry, w: drillPriority(entry[0]) + Math.random() * 3 }))
             .sort((a, b) => b.w - a.w)
             .slice(0, size)
@@ -1925,6 +1976,26 @@ function TabiyaApp() {
                             ".")) : games.every((g) => String(g.id).startsWith("sample-")) ? (React.createElement("button", { onClick: clearGames, style: { marginTop: 10, display: "flex", alignItems: "center", gap: 5, background: "transparent", border: "none", color: C.ivoryDim, fontSize: 11.5, cursor: "pointer", padding: 0, textDecoration: "underline" } },
                             React.createElement(Trash2, { size: 11 }),
                             " Remove sample games")) : null),
+                    openingsReport && React.createElement("div", { style: { background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" } },
+                            React.createElement("h2", { style: { fontFamily: displayFont, fontSize: 16, color: C.gold, margin: 0 } }, "Your openings"),
+                            React.createElement("button", { onClick: () => setShowReport((v) => !v), style: { background: "transparent", border: `1px solid ${C.borderLight}`, color: C.ivoryDim, borderRadius: 5, padding: "3px 9px", fontSize: 11.5, cursor: "pointer" } }, showReport ? "Hide breakdown" : "Show breakdown")),
+                        React.createElement("div", { style: { fontSize: 12, color: C.ivoryDim, marginTop: 8, lineHeight: 1.6 } },
+                            "Your score when the game ends by move 20: ",
+                            openingsReport.short ? React.createElement("strong", { style: { color: openingsReport.short.pct < 45 ? C.crimsonBright : openingsReport.short.pct > 55 ? C.sageBright : C.ivory } }, `${openingsReport.short.pct}%`) : "\u2013",
+                            " \u00B7 moves 21\u201340: ",
+                            openingsReport.mid ? React.createElement("strong", { style: { color: openingsReport.mid.pct < 45 ? C.crimsonBright : openingsReport.mid.pct > 55 ? C.sageBright : C.ivory } }, `${openingsReport.mid.pct}%`) : "\u2013",
+                            " \u00B7 after move 40: ",
+                            openingsReport.long ? React.createElement("strong", { style: { color: openingsReport.long.pct < 45 ? C.crimsonBright : openingsReport.long.pct > 55 ? C.sageBright : C.ivory } }, `${openingsReport.long.pct}%`) : "\u2013",
+                            ". A low early score means the opening is costing you games."),
+                        showReport && React.createElement("div", { style: { marginTop: 10 } },
+                            [["As White (by their reply)", openingsReport.white], ["As Black (by your reply)", openingsReport.black]].map(([title, rows]) => rows.length > 0 && React.createElement("div", { key: title, style: { marginBottom: 10 } },
+                                React.createElement("div", { style: { fontSize: 11.5, color: C.ivoryDim, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 } }, title),
+                                rows.map((r) => React.createElement("div", { key: r.k, style: { display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, fontSize: 12.5, padding: "3px 0", borderBottom: `1px solid ${C.border}` } },
+                                    React.createElement("span", { style: { fontFamily: monoFont, color: C.ivory } }, r.k),
+                                    React.createElement("span", { style: { color: C.ivoryDim } }, `${r.n} games`),
+                                    React.createElement("span", { style: { fontWeight: 600, minWidth: 36, textAlign: "right", color: r.pct < 45 ? C.crimsonBright : r.pct > 55 ? C.sageBright : C.ivory } }, `${r.pct}%`))))),
+                            React.createElement("div", { style: { fontSize: 11.5, color: C.ivoryDim, fontStyle: "italic" } }, "Red lines (under 45%) are where to start. Then sort positions by Worst score to find the exact spot."))),
                     React.createElement("div", { id: "tb-list", style: { background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16, scrollMarginTop: 12 } },
                         React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 } },
                             React.createElement("h2", { style: { fontFamily: displayFont, fontSize: 16, color: C.gold, margin: 0 } },
@@ -1958,6 +2029,10 @@ function TabiyaApp() {
                                 " ")),
                             recurring.length >= 200 ? "Showing top 200." : ""),
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, color: C.ivoryDim, flexWrap: "wrap" } },
+                            "Sort:",
+                            React.createElement("div", { style: { display: "inline-flex", border: `1px solid ${C.borderLight}`, borderRadius: 5, overflow: "hidden" } }, [["seen", "Most reached"], ["worst", "Worst score"]].map(([val, lbl]) => React.createElement("button", { key: val, onClick: () => { setSortMode(val); saveStored("tabiya-sort", val); }, style: { background: sortMode === val ? C.gold : "transparent", color: sortMode === val ? "#ffffff" : C.ivoryDim, border: "none", padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: bodyFont } }, lbl))),
+                            sortMode === "worst" && React.createElement("span", { style: { fontStyle: "italic" } }, "Quiz pulls from your 25 worst.")),
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, color: C.ivoryDim, flexWrap: "wrap" } },
                             "Grading:",
                             React.createElement("div", { style: { display: "inline-flex", border: `1px solid ${C.borderLight}`, borderRadius: 5, overflow: "hidden" } }, [[true, "Best move only"], [false, "Any good move"]].map(([val, lbl]) => React.createElement("button", { key: lbl, onClick: () => { setStrictGrading(val); saveStored("tabiya-grading-strict", val); }, style: { background: strictGrading === val ? C.gold : "transparent", color: strictGrading === val ? "#ffffff" : C.ivoryDim, border: "none", padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: bodyFont } }, lbl)))),
                         React.createElement("button", { onClick: startQuiz, disabled: recurring.length === 0, style: { width: "100%", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: recurring.length ? C.gold : C.border, color: recurring.length ? "#ffffff" : C.ivoryDim, border: "none", borderRadius: 6, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, cursor: recurring.length ? "pointer" : "default" } },
@@ -1976,13 +2051,15 @@ function TabiyaApp() {
                                 const opening = openingNameFor(rep.label);
                                 const score = heroScore(data.occurrences);
                                 const ds = drillStats[key];
+                                const undecided = !hasBook && undecidedInfo(data.occurrences);
                                 return (React.createElement("button", { key: key, onClick: () => selectPosition(key), style: { textAlign: "left", background: isActive ? "#ece5f7" : "transparent", border: `1px solid ${isActive ? C.gold : C.border}`, borderRadius: 6, padding: "8px 10px", cursor: "pointer", color: C.ivory } },
                                     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 } },
                                         React.createElement("span", { style: { fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, opening || (rep.label || "starting position")),
                                         React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5, flexShrink: 0 } },
                                             ds && ds.streak >= 2 && React.createElement(Check, { size: 12, color: C.sageBright }),
                                             ds && ds.streak === 0 && ds.misses > 0 && React.createElement(X, { size: 12, color: C.crimsonBright }),
-                                            hasBook && React.createElement(Star, { size: 12, fill: C.gold, color: C.gold }))),
+                                            hasBook && React.createElement(Star, { size: 12, fill: C.gold, color: C.gold }),
+                                            undecided && React.createElement("span", { title: "You play different moves here", style: { fontSize: 10, fontWeight: 400, color: C.crimsonBright, border: `1px solid ${C.crimsonBright}`, borderRadius: 4, padding: "0 4px", lineHeight: "15px" } }, "undecided"))),
                                     opening && (React.createElement("div", { style: { fontFamily: monoFont, fontSize: 10.5, color: C.ivoryDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 } }, rep.label)),
                                     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 3 } },
                                         React.createElement("span", { style: { fontSize: 11, color: C.ivoryDim } },
@@ -2105,6 +2182,7 @@ function TabiyaApp() {
                                 React.createElement("button", { onClick: () => markBestMove(selectedKey, bookMove), style: { background: "transparent", border: "none", color: C.ivoryDim, fontSize: 11.5, cursor: "pointer", textDecoration: "underline" } }, "Remove star")),
                             React.createElement("textarea", { value: noteDraft, onChange: (e) => setNoteDraft(e.target.value), onBlur: () => saveBookNote(selectedKey, noteDraft), placeholder: "Why this move? e.g. \u201CKeeps the Berlin endgame off the board.\u201D Shown when you drill this position.", rows: 2, style: { width: "100%", marginTop: 8, fontSize: 12.5, fontFamily: bodyFont, padding: "6px 8px", border: `1px solid ${C.borderLight}`, borderRadius: 4, background: "#fbfaff", color: C.ivory, resize: "vertical" } }))),
                         selected.occurrences.length > 0 && (React.createElement(React.Fragment, null,
+                            !bookMove && undecidedInfo(selected.occurrences) && React.createElement("div", { style: { fontSize: 12.5, color: C.crimsonBright, background: "#f7ecee", border: `1px solid ${C.crimsonBright}33`, borderRadius: 6, padding: "8px 10px", marginBottom: 10, lineHeight: 1.5 } }, `Undecided: you've played ${undecidedInfo(selected.occurrences).moves} different moves here. Pick one and star it, so the quiz drills a single answer.`),
                             React.createElement("div", { style: { marginBottom: 8, fontSize: 12.5, color: C.ivoryDim, textTransform: "uppercase", letterSpacing: "0.06em" } }, "What you've actually played here"),
                             React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, groupOccurrences(selected.occurrences).map((grp, i) => {
                                 const isBook = bookMove && sameSq(bookMove.from, grp.from) && sameSq(bookMove.to, grp.to);
