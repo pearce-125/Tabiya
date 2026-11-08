@@ -14,7 +14,8 @@ body { height: 100%; margin: 0; background: var(--bg); overflow-x: hidden; }
 img, svg { max-width: 100%; }
 .tb-mobile-only { display: none; }
 @media (max-width: 820px) {
-  .tb-main { grid-template-columns: 1fr !important; }
+  .tb-main { grid-template-columns: minmax(0, 1fr) !important; }
+  .tb-main > * { min-width: 0; }
 }
 @media (max-width: 600px) {
   .tb-root { padding: 16px 12px 40px !important; }
