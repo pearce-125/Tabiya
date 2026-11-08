@@ -741,18 +741,20 @@ function cpGap(best, cp) {
 }
 // Grade a board attempt. Your starred line is the answer key when you have one;
 // otherwise any engine top-3 move within half a pawn counts; otherwise your most common move.
-function gradeAttempt(key, data, attempt, engineMoves, bestMoves) {
+// strict: only the engine's top move counts. Otherwise any top-3 move within half a pawn counts.
+function gradeAttempt(key, data, attempt, engineMoves, bestMoves, strict) {
     if (!attempt)
         return null;
     const book = bestMoves[key];
     const em = engineReady(engineMoves[key]) ? engineMoves[key] : null;
     const hist = mostCommonMove(data.occurrences);
     const matches = (m) => m && sameSq(attempt.from, m.from) && sameSq(attempt.to, m.to);
-    let engineIdx = -1, engineOk = false, engineNote = null;
+    let engineIdx = -1, engineOk = false, withinMargin = false, engineNote = null;
     if (em) {
         engineIdx = em.lines.findIndex(matches);
         const best = em.lines[0].cp;
-        engineOk = engineIdx === 0 || (engineIdx > 0 && best - em.lines[engineIdx].cp <= ENGINE_MARGIN_CP);
+        withinMargin = engineIdx === 0 || (engineIdx > 0 && best - em.lines[engineIdx].cp <= ENGINE_MARGIN_CP);
+        engineOk = strict ? engineIdx === 0 : withinMargin;
         engineNote = engineIdx === 0
             ? "Engine's top choice."
             : engineIdx > 0
@@ -768,7 +770,7 @@ function gradeAttempt(key, data, attempt, engineMoves, bestMoves) {
             const detail = !em ? null : engineIdx === 0 ? "It's also the engine's top choice." : rank ? `It's ${rank}; the engine's top pick is ${top}.` : `The engine prefers ${top}.`;
             return { correct: true, verdict: "Correct: your line", detail, reference: ref, yourSan };
         }
-        const detail = engineOk
+        const detail = withinMargin
             ? `${yourSan} is sound (${rank}), but your line here is ${book.san}.`
             : `Your line here is ${book.san}.` + (em ? ` The engine's top pick is ${top}.` : "");
         return { correct: false, verdict: "Not your line", detail, reference: ref, yourSan };
@@ -778,7 +780,7 @@ function gradeAttempt(key, data, attempt, engineMoves, bestMoves) {
         if (engineOk) {
             return { correct: true, verdict: engineIdx === 0 ? "Correct: engine's top choice" : `Correct: solid alternative (${ordinal(engineIdx + 1)} best)`, detail: engineIdx === 0 ? null : engineNote, reference: ref, yourSan };
         }
-        return { correct: false, verdict: "Not quite", detail: engineNote + (matches(hist) ? " (This is your usual move here.)" : ""), reference: ref, yourSan };
+        return { correct: false, verdict: withinMargin ? "Close: a good move, but not the best" : "Not quite", detail: engineNote + (matches(hist) ? " (This is your usual move here.)" : ""), reference: ref, yourSan };
     }
     if (hist) {
         const ref = { from: hist.from, to: hist.to, label: hist.san, source: "history" };
@@ -1231,7 +1233,7 @@ function Board({ board, selected, legalTargets, onSquareClick, flip = false, siz
 /* ============================================================
    QUIZ SESSION
    ============================================================ */
-function QuizSession({ initialPositions, engineStatus, engineMoves, requestEngineMove, bestMoves, onExit, onRetryMissed, onRecord }) {
+function QuizSession({ initialPositions, engineStatus, engineMoves, requestEngineMove, bestMoves, onExit, onRetryMissed, onRecord, strictGrading = true }) {
     const [order] = useState(() => shuffleArray(initialPositions));
     const [idx, setIdx] = useState(0);
     const [score, setScore] = useState(0);
@@ -1274,7 +1276,7 @@ function QuizSession({ initialPositions, engineStatus, engineMoves, requestEngin
     function submit() {
         if (!attempt || waitingForEngine)
             return;
-        const g = gradeAttempt(key, data, attempt, engineMoves, bestMoves);
+        const g = gradeAttempt(key, data, attempt, engineMoves, bestMoves, strictGrading);
         setGrade(g);
         setRevealed(true);
         if (!g || g.correct === null)
@@ -1384,7 +1386,7 @@ function QuizSession({ initialPositions, engineStatus, engineMoves, requestEngin
                         : engineState === "pending" || (!engineState && engineStatus === "ready")
                             ? "Engine thinking…"
                             : engineStatus === "ready"
-                                ? "Engine ready"
+                                ? (strictGrading ? "Grading: engine's best move only" : "Grading: any good engine move")
                                 : "Loading engine…"))));
 }
 /* ============================================================
@@ -1408,6 +1410,7 @@ function TabiyaApp() {
     const [noteDraft, setNoteDraft] = useState("");
     const [heroDraft, setHeroDraft] = useState("");
     const [minSeen, setMinSeen] = useState(2);
+    const [strictGrading, setStrictGrading] = useState(true);
     const [minMove, setMinMove] = useState(1);
     const [importMsg, setImportMsg] = useState(null);
     const [mode, setMode] = useState("browse"); // browse | quiz
@@ -1452,6 +1455,7 @@ function TabiyaApp() {
             setCustomPositions(storedCustom || []);
             setShowOnboarding(!dismissedOnboarding);
             setDrillStats(storedStats || {});
+            setStrictGrading((await loadStored("tabiya-grading-strict", true)) !== false);
             setLoaded(true);
         })();
     }, []);
@@ -1802,7 +1806,7 @@ function TabiyaApp() {
     const emSel = selectedKey ? engineMoves[selectedKey] : null;
     const browseWaiting = !!selectedKey && !bestMoves[selectedKey] && engineStatus !== "unavailable"
         && (engineStatus === "loading" || !emSel || emSel === "pending");
-    const browseGrade = selectedKey && selected && attempt && !browseWaiting ? gradeAttempt(selectedKey, selected, attempt, engineMoves, bestMoves) : null;
+    const browseGrade = selectedKey && selected && attempt && !browseWaiting ? gradeAttempt(selectedKey, selected, attempt, engineMoves, bestMoves, strictGrading) : null;
     const correctForSelected = browseGrade ? browseGrade.reference : null;
     const attemptMatches = !!(browseGrade && browseGrade.correct);
     const emSelected = selectedKey ? engineMoves[selectedKey] : null;
@@ -1822,7 +1826,7 @@ function TabiyaApp() {
                     " Exit"),
                 React.createElement("span", { style: { fontFamily: displayFont, fontSize: 18, color: C.gold, fontWeight: 700 } }, "Tabiya"),
                 React.createElement("span", { style: { width: 40 } })),
-            React.createElement(QuizSession, { key: quizRunId, initialPositions: quizPositions, engineStatus: engineStatus, engineMoves: engineMoves, requestEngineMove: requestEngineMove, bestMoves: bestMoves, onExit: () => setMode("browse"), onRetryMissed: retryMissed, onRecord: recordDrillResult }))) : (React.createElement(React.Fragment, null,
+            React.createElement(QuizSession, { key: quizRunId, initialPositions: quizPositions, engineStatus: engineStatus, engineMoves: engineMoves, requestEngineMove: requestEngineMove, bestMoves: bestMoves, onExit: () => setMode("browse"), onRetryMissed: retryMissed, onRecord: recordDrillResult, strictGrading: strictGrading }))) : (React.createElement(React.Fragment, null,
             React.createElement("div", { style: { maxWidth: 1080, margin: "0 auto 20px" } },
                 React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 } },
                     React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" } },
@@ -1953,6 +1957,9 @@ function TabiyaApp() {
                                 React.createElement("button", { onClick: () => { setHeroDraft(heroName || ""); setEditingHero(true); }, style: { fontSize: 12, background: "transparent", color: C.goldBright, border: "none", padding: 0, cursor: "pointer", textDecoration: "underline" } }, heroName ? "Not you?" : "Set your username"),
                                 " ")),
                             recurring.length >= 200 ? "Showing top 200." : ""),
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, color: C.ivoryDim, flexWrap: "wrap" } },
+                            "Grading:",
+                            React.createElement("div", { style: { display: "inline-flex", border: `1px solid ${C.borderLight}`, borderRadius: 5, overflow: "hidden" } }, [[true, "Best move only"], [false, "Any good move"]].map(([val, lbl]) => React.createElement("button", { key: lbl, onClick: () => { setStrictGrading(val); saveStored("tabiya-grading-strict", val); }, style: { background: strictGrading === val ? C.gold : "transparent", color: strictGrading === val ? "#ffffff" : C.ivoryDim, border: "none", padding: "4px 10px", fontSize: 12, cursor: "pointer", fontFamily: bodyFont } }, lbl)))),
                         React.createElement("button", { onClick: startQuiz, disabled: recurring.length === 0, style: { width: "100%", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: recurring.length ? C.gold : C.border, color: recurring.length ? "#ffffff" : C.ivoryDim, border: "none", borderRadius: 6, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, cursor: recurring.length ? "pointer" : "default" } },
                             React.createElement(Swords, { size: 14 }),
                             " Play quiz (",
@@ -2123,7 +2130,7 @@ function TabiyaApp() {
                         isCustomSelected && selected.occurrences.length === 0 && (React.createElement("p", { style: { fontSize: 12.5, color: C.ivoryDim, fontStyle: "italic" } }, "No game history for this one \u2014 it's a custom setup. Play a move above and mark it as correct, or wait for the engine.")),
                         React.createElement("div", { style: { marginTop: 18, display: "flex", alignItems: "flex-start", gap: 8, fontSize: 11.5, color: C.ivoryDim, lineHeight: 1.5 } },
                             React.createElement(Info, { size: 13, style: { flexShrink: 0, marginTop: 1 } }),
-                            React.createElement("span", null, "How grading works: if you've starred a move here, that's the answer, and the engine just comments on it. Without a star, any of the engine's top 3 moves within half a pawn of its best counts as correct. If the engine can't load, your most common move here is the answer.")))))))))));
+                            React.createElement("span", null, strictGrading ? "How grading works: if you've starred a move here, that's the answer, and the engine just comments on it. Without a star, only the engine's top move counts (switch to \u201cAny good move\u201d to accept close alternatives). If the engine can't load, your most common move here is the answer." : "How grading works: if you've starred a move here, that's the answer, and the engine just comments on it. Without a star, any of the engine's top 3 moves within half a pawn of its best counts as correct. If the engine can't load, your most common move here is the answer.")))))))))));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(TabiyaApp));
 
