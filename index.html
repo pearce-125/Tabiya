@@ -1876,7 +1876,7 @@ function TabiyaApp() {
                         showImport && (React.createElement("div", { style: { marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${C.border}` } },
                             React.createElement("div", { style: { marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${C.border}` } },
                                 React.createElement("label", { style: { fontSize: 12, color: C.ivoryDim, display: "block", marginBottom: 6 } }, "Load a PGN file \u2014 from Lichess or Chess.com's export"),
-                                React.createElement("input", { type: "file", accept: ".pgn,.txt", onChange: handleFileImport, style: { fontSize: 12, color: C.ivoryDim, width: "100%" } }),
+                                React.createElement("input", { type: "file", onChange: handleFileImport, style: { fontSize: 12, color: C.ivoryDim, width: "100%" } }),
                                 React.createElement("label", { style: { fontSize: 12, color: C.ivoryDim, display: "flex", alignItems: "center", gap: 6, marginTop: 8, cursor: "pointer" } },
                                     React.createElement("input", { type: "checkbox", checked: appendImport, onChange: (e) => setAppendImport(e.target.checked) }),
                                     "Add to existing games instead of replacing (for loading Chess.com's 50-game batches one after another)"),
